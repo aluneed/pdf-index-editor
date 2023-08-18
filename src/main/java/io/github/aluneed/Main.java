@@ -4,36 +4,57 @@ import com.itextpdf.text.*;
 import com.itextpdf.text.pdf.*;
 
 import java.io.*;
-import java.util.Arrays;
-import java.util.HashMap;
+import java.util.*;
 import java.util.List;
-import java.util.concurrent.CompletionService;
-import java.util.concurrent.Executor;
-import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
-// Press Shift twice to open the Search Everywhere dialog and type `show whitespaces`,
-// then press Enter. You can now see whitespace characters in your code.
 public class Main {
+
     public static void main(String[] args) {
-        String indexInputPath = "/Users/aluneed/projects/pdf-index-editor/java并发编程实战目录.md";
-        String pdfInputPath = "/Users/aluneed/projects/pdf-index-editor/java并发编程实战.pdf";
-        String pdfOutputPath = "/Users/aluneed/projects/pdf-index-editor/java并发编程实战-indexed.pdf";
-        int spaces = 2;
+        int indentSpaces = Integer.parseInt(args[0]);
+        String indexInputPath = args[1];
+        String pdfInputPath = args[2];
+        String pdfOutputPath = args[3] == null ? "." : args[3];
 
         try (FileReader fileReader = new FileReader(indexInputPath)) {
             BufferedReader bufferedReader = new BufferedReader(fileReader);
             List<String> indexTextLines = bufferedReader.lines().toList();
-            List<Bookmark> bookmarks = indexTextLines.stream()
-                    .
+            if (indexTextLines.isEmpty()) {
+                throw new RuntimeException("invalid index");
+            }
+            Integer pageStart = Integer.parseInt(
+                    indexTextLines.get(0)
+                            .replaceAll("pageStart", "")
+                            .trim()
+            );
+            int difference = pageStart - 1;
 
+            List<Bookmark> parsedBookmarks = indexTextLines.stream().skip(1)
+                    .map(line -> {
+                        Integer spaceNum = line.indexOf("-");
+                        if (spaceNum < 0) {
+                            return null;
+                        }
+                        String simpleLine = line.trim().replace("- ", "");
+                        int lastSpaceIndex = simpleLine.lastIndexOf(" ");
+                        String pageNumberString = simpleLine.substring(lastSpaceIndex + 1);
+                        Integer pageNumber = pageNumberString.startsWith("[") ?
+                                Integer.parseInt(pageNumberString.replace("[", "").replace("]", "")) :
+                                (Integer.parseInt(pageNumberString) + difference);
+                        Bookmark bookmark = new Bookmark();
+                        bookmark.name = simpleLine.substring(0, lastSpaceIndex);
+                        bookmark.pdfPageNumber = pageNumber;
+                        bookmark.depth = spaceNum / indentSpaces;
+                        return bookmark;
+                    })
+                    .filter(Objects::nonNull)
+                    .toList();
+
+            List<Bookmark> bookmarkTree = Bookmark.toTree(parsedBookmarks);
 
             PdfReader pdfReader = new PdfReader(pdfInputPath);
 
-
             FileOutputStream pdfOutputStream = new FileOutputStream(pdfOutputPath);
             Document document = new Document();
-//            PdfWriter pdfWriter  = PdfWriter.getInstance(document, pdfOutputStream);
             //https://api.itextpdf.com/iText5/java/5.5.13/com/itextpdf/text/pdf/PdfCopy.html
             PdfCopy pdfCopy = new PdfCopy(document, pdfOutputStream);
             pdfCopy.setViewerPreferences(PdfWriter.PageModeUseOutlines);
@@ -51,20 +72,9 @@ public class Main {
 
             //https://api.itextpdf.com/iText5/java/5.5.13/com/itextpdf/text/pdf/PdfOutline.html
             PdfOutline rootOutline = pdfCopy.getRootOutline();
-            rootOutline.setOpen(false);
+//            rootOutline.setOpen(false);
 
-            //https://api.itextpdf.com/iText5/java/5.5.13/com/itextpdf/text/pdf/PdfDestination.html
-            PdfDestination pdfDestination = new PdfDestination(PdfDestination.FIT);
-//            PdfDestination pdfDestination = new PdfDestination(PdfDestination.XYZ, 0, 728, 0);
-            PdfAction pdfAction = PdfAction.gotoLocalPage(10, pdfDestination, pdfCopy);
-            PdfOutline pdfOutline = new PdfOutline(rootOutline, pdfAction, "test", false);
-
-//            var list = SimpleBookmark.getBookmark(pdfReader);
-//            HashMap<String, Object> bookmark = new HashMap<>();
-//            bookmark.put("Action", "GoTo");
-//            bookmark.put("Title", "test");
-//            bookmark.put("Page", "10");
-//            pdfCopy.setOutlines(list);
+            writeBookmark(pdfCopy, bookmarkTree, rootOutline);
 
             document.close();
 
@@ -73,22 +83,71 @@ public class Main {
         }
     }
 
-    private static void writeToPdf(int depth, String textLine, PdfCopy pdfCopy, PdfReader pdfReader, PdfOutline pdfOutline) {
-        textLine.toString();
+    private static void writeBookmark(final PdfCopy pdfCopy, List<Bookmark> bookmarkTree, PdfOutline outlineNode) {
+        //https://api.itextpdf.com/iText5/java/5.5.13/com/itextpdf/text/pdf/PdfDestination.html
+        PdfDestination pdfDestination = new PdfDestination(PdfDestination.FIT);
 
-        PdfAction pdfAction = PdfAction.gotoLocalPage(pageNum, new PdfDestination(PdfDestination.FIT), pdfCopy);
+        for (Bookmark bookmark : bookmarkTree) {
+            PdfAction pdfAction = PdfAction.gotoLocalPage(bookmark.pdfPageNumber, pdfDestination, pdfCopy);
+            PdfOutline subNode = new PdfOutline(outlineNode, pdfAction, bookmark.name, false);
+//            pdfOutline.setDestinationPage();
 
-        String
-
-
+            if (bookmark.kids != null) {
+                writeBookmark(pdfCopy, bookmark.kids, subNode);
+            }
+        }
     }
-
 
 }
 
 class Bookmark {
-    List<Bookmark> kids;
     String name;
     int pdfPageNumber;
     int depth;
+    List<Bookmark> kids;
+
+    public static List<Bookmark> toTree(List<Bookmark> flatOrederedList) {
+        Bookmark root = new Bookmark();
+        root.kids = new ArrayList<>();
+        root.depth = -1;
+        root.name = "root";
+        addNode(root, null, flatOrederedList, 0);
+        return root.kids;
+    }
+
+    public static Integer addNode(Bookmark currentRoot, String namePrefix, List<Bookmark> list, Integer index) {
+        Integer prefixCount = 0;
+        while (index < list.size()) {
+            Bookmark node = list.get(index);
+            String prefix = namePrefix == null ? prefixCount.toString() : namePrefix + "." + prefixCount;
+
+            if (currentRoot.depth == node.depth - 1) {  //simple direct child node
+                if (currentRoot.kids == null) {
+                    currentRoot.kids = new ArrayList<>();
+                }
+                currentRoot.kids.add(node);
+                if (node.depth > 0) {
+                    prefixCount++;
+                    prefix = namePrefix == null ? prefixCount.toString() : namePrefix + "." + prefixCount;
+                    node.name = prefix + " " + node.name;
+                }
+                if (node.depth == 0 && list.get(Math.min(index + 1, list.size() - 1)).depth == 1) {
+                    prefixCount++;
+                }
+                index++;
+            } else if (currentRoot.depth < node.depth - 1) {  //dive into next child root
+                Bookmark nextRoot = currentRoot.kids.getLast();
+                index = addNode(nextRoot, prefix, list, index);
+            } else if (currentRoot.depth >= node.depth) {  //escape from nested subtree
+                return index;
+            }
+        }
+        return index;
+    }
+
+    @Override
+    public String toString() {
+        return this.name;
+    }
+
 }
